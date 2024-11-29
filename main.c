@@ -9,48 +9,199 @@
 #include "netpbm.h"
 #include <stdio.h>
 
-void increaseContrast(char *inputFilename, char *outputFilename, double contrastFactor);
+
+void shrinkImage(Image *img);
+void expandImage(Image *img);
+// Function to apply Sobel edge detection
+Matrix sobelEdgeDetection(Image img);
+// Function to enhance contrast of an image by a given factor
+Image enhanceEdges(Image img, double contrastFactor);
+// Function to apply a binary threshold to an image based on intensity
+void applyEdgeThreshold(Image *img, unsigned char threshold);
+// Function to clean up edges using morphological operations (shrink and expand)
+void cleanUpEdges(Image *img);
 
 int main(int argc, const char * argv[]) {
     char inputFilename[] = "C:/Users/harun/CLionProjects/CoralCount/CoralCount/Samples/Sample8.ppm";
     char outputFilename[] = "C:/Users/harun/CLionProjects/CoralCount/CoralCount/Outputs/SampleOutput.ppm";
-    double contrastFactor = 1.5;  // Increase contrast by 50%
 
-    increaseContrast(inputFilename, outputFilename, contrastFactor);
+    // Step 1: Read the input image
+    Image img = readImage(inputFilename);
+    if (img.map == NULL) {
+        fprintf(stderr, "Error: Could not read image file %s.\n", inputFilename);
+        return 1;
+    }
+
+    // Step 2: Apply Sobel edge detection
+    Matrix edgeMatrix = sobelEdgeDetection(img);
+
+    // Convert edge matrix back to image
+    Image edgeImage = matrix2Image(edgeMatrix, 0, 1.0);
+    deleteMatrix(edgeMatrix);
+
+    // Step 3: Enhance the contrast of the edge image
+    double contrastFactor = 2.0; // Experiment with higher contrast
+    Image highContrastImage = enhanceEdges(edgeImage, contrastFactor);
+
+    // Step 4: Apply a lower threshold to make the edges more distinct
+    unsigned char threshold = 50; // Lower threshold to capture more edges
+    applyEdgeThreshold(&highContrastImage, threshold);
+
+    // Step 5: Clean up the edges using morphological operations
+    cleanUpEdges(&highContrastImage);
+
+    // Step 6: Write the processed image to a new file
+    writeImage(highContrastImage, outputFilename);
+
+    // Free memory
+    deleteImage(img);
+    deleteImage(highContrastImage);
 
     printf("Program ends ... ");
     return 0;
 }
 
-void increaseContrast(char *inputFilename, char *outputFilename, double contrastFactor) {
-    // Step 1: Read the image
-    Image img = readImage(inputFilename);
-    if (img.map == NULL) {
-        fprintf(stderr, "Error: Could not read image file %s.\n", inputFilename);
-        return;
+void shrinkImage(Image *img) {
+    Image temp = createImage(img->height, img->width);
+
+    for (int i = 0; i < img->height; i++) {
+        for (int j = 0; j < img->width; j++) {
+            unsigned char minR = 255, minG = 255, minB = 255;
+
+            // Check all 8 neighbors
+            for (int di = -1; di <= 1; di++) {
+                for (int dj = -1; dj <= 1; dj++) {
+                    int ni = i + di, nj = j + dj;
+                    if (ni >= 0 && ni < img->height && nj >= 0 && nj < img->width) {
+                        minR = MIN(minR, img->map[ni][nj].r);
+                        minG = MIN(minG, img->map[ni][nj].g);
+                        minB = MIN(minB, img->map[ni][nj].b);
+                    }
+                }
+            }
+
+            temp.map[i][j].r = minR;
+            temp.map[i][j].g = minG;
+            temp.map[i][j].b = minB;
+            temp.map[i][j].i = (minR + minG + minB) / 3;  // Update intensity
+        }
     }
 
-    // Step 2: Convert the image to a matrix
+    // Copy back the result
+    for (int i = 0; i < img->height; i++) {
+        for (int j = 0; j < img->width; j++) {
+            img->map[i][j] = temp.map[i][j];
+        }
+    }
+
+    deleteImage(temp);
+}
+
+void expandImage(Image *img) {
+    Image temp = createImage(img->height, img->width);
+
+    for (int i = 0; i < img->height; i++) {
+        for (int j = 0; j < img->width; j++) {
+            unsigned char maxR = 0, maxG = 0, maxB = 0;
+
+            // Check all 8 neighbors
+            for (int di = -1; di <= 1; di++) {
+                for (int dj = -1; dj <= 1; dj++) {
+                    int ni = i + di, nj = j + dj;
+                    if (ni >= 0 && ni < img->height && nj >= 0 && nj < img->width) {
+                        maxR = MAX(maxR, img->map[ni][nj].r);
+                        maxG = MAX(maxG, img->map[ni][nj].g);
+                        maxB = MAX(maxB, img->map[ni][nj].b);
+                    }
+                }
+            }
+
+            temp.map[i][j].r = maxR;
+            temp.map[i][j].g = maxG;
+            temp.map[i][j].b = maxB;
+            temp.map[i][j].i = (maxR + maxG + maxB) / 3;  // Update intensity
+        }
+    }
+
+    // Copy back the result
+    for (int i = 0; i < img->height; i++) {
+        for (int j = 0; j < img->width; j++) {
+            img->map[i][j] = temp.map[i][j];
+        }
+    }
+
+    deleteImage(temp);
+}
+
+// Apply Sobel edge detection and scale the results
+Matrix sobelEdgeDetection(Image img) {
+    int gx[3][3] = {{-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1}}; // X-direction
+    int gy[3][3] = {{-1, -2, -1}, {0, 0, 0}, {1, 2, 1}};  // Y-direction
+
+    Matrix edgeMatrix = createMatrix(img.height, img.width);
+
+    for (int i = 1; i < img.height - 1; i++) {
+        for (int j = 1; j < img.width - 1; j++) {
+            double sumX = 0.0, sumY = 0.0;
+
+            // Apply Sobel kernels
+            for (int k = -1; k <= 1; k++) {
+                for (int l = -1; l <= 1; l++) {
+                    unsigned char intensity = img.map[i + k][j + l].i;
+                    sumX += gx[k + 1][l + 1] * intensity;
+                    sumY += gy[k + 1][l + 1] * intensity;
+                }
+            }
+
+            // Calculate gradient magnitude and apply scaling
+            double magnitude = sqrt(sumX * sumX + sumY * sumY);
+            edgeMatrix.map[i][j] = (unsigned char) MIN(255, magnitude * 2); // Adjust scaling factor if necessary
+        }
+    }
+
+    return edgeMatrix;
+}
+
+// Function to enhance the contrast of an image by adjusting intensity values
+Image enhanceEdges(Image img, double contrastFactor) {
     Matrix intensityMatrix = image2Matrix(img);
 
-    // Step 3: Apply contrast adjustment
+    // Adjust contrast for each intensity value
     for (int i = 0; i < intensityMatrix.height; i++) {
         for (int j = 0; j < intensityMatrix.width; j++) {
-            // Adjust contrast
             double newValue = 128 + contrastFactor * (intensityMatrix.map[i][j] - 128);
-            // Clamp values to [0, 255]
             intensityMatrix.map[i][j] = MAX(0, MIN(255, newValue));
         }
     }
 
-    // Step 4: Convert the modified matrix back to an image
     Image contrastedImage = matrix2Image(intensityMatrix, 0, 1.0);
 
-    // Step 5: Write the new image to a file
-    writeImage(contrastedImage, outputFilename);
-
-    // Step 6: Free memory
-    deleteImage(img);
     deleteMatrix(intensityMatrix);
-    deleteImage(contrastedImage);
+
+    return contrastedImage;
+}
+
+// Apply a lower threshold to make more edges visible
+void applyEdgeThreshold(Image *img, unsigned char threshold) {
+    for (int i = 0; i < img->height; i++) {
+        for (int j = 0; j < img->width; j++) {
+            unsigned char intensity = img->map[i][j].i;
+            if (intensity >= threshold) {
+                img->map[i][j].r = 255;
+                img->map[i][j].g = 255;
+                img->map[i][j].b = 255;
+                img->map[i][j].i = 255;
+            } else {
+                img->map[i][j].r = 0;
+                img->map[i][j].g = 0;
+                img->map[i][j].b = 0;
+                img->map[i][j].i = 0;
+            }
+        }
+    }
+}
+
+void cleanUpEdges(Image *img) {
+    shrinkImage(img); // Removes small noise
+    expandImage(img); // Expands edges to restore structure
 }
