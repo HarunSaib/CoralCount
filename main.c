@@ -8,6 +8,7 @@
 #include <math.h>
 #include "netpbm.h"
 #include <stdio.h>
+#include <stdbool.h>
 
 
 void shrinkImage(Image *img);
@@ -20,13 +21,20 @@ Image enhanceEdges(Image img, double contrastFactor);
 void applyEdgeThreshold(Image *img, unsigned char threshold);
 // Function to clean up edges using morphological operations (shrink and expand)
 void cleanUpEdges(Image *img);
-
+// Function to smooth the image using averaging
 Image averageNeighborPixels(Image img, int size);
+// Canny Edge Detection performed on given image
 Image canny(Image img);
+// Uses Hough Transform to detect any number of circles within given specifications
+Image detectCirclesHough(Image edgeImage, int minRadius, int maxRadius, int threshold);
+// Takes in an image with hollow white rings and fills them with white, creates a mask 
+Image fillRings(Image *img);
+// Takes an image and a mask defined by fillRings and it clears the noise 
+void clearNoise(Image *input, Image *mask, int threshold);
 
 int main(int argc, const char * argv[]) {
     char inputFilename[] = "/Users/sachinkaul/Documents/GitHub/CoralCount/Samples/Sample8.ppm";
-    char outputFilename[] = "/Users/sachinkaul/Documents/GitHub/CoralCount/Outputs/SampleOutput.ppm";
+    char outputFilename[] = "/Users/sachinkaul/Documents/GitHub/CoralCount/Outputs/SampleOutput2.ppm";
 
     // Step 1: Read the input image
     Image img = readImage(inputFilename);
@@ -38,16 +46,11 @@ int main(int argc, const char * argv[]) {
     //Smooth the image
     Image smoothed = averageNeighborPixels(img, 2);
 
-    // Step 2: Apply Sobel edge detection
-    /*Matrix edgeMatrix = sobelEdgeDetection(img);
+    deleteImage(img);
 
-    // Convert edge matrix back to image
-    Image edgeImage = matrix2Image(edgeMatrix, 0, 1.0);
-    deleteMatrix(edgeMatrix);*/
-
-    //Step 2.5: Apply Canny Edge Detector
+    //Step 2: Apply Canny Edge Detector
     Image edgeImage = canny(smoothed);
-    writeImage(edgeImage, "/Users/sachinkaul/Documents/GitHub/CoralCount/Outputs/testOutput1.ppm");
+    deleteImage(smoothed);
 
     // Step 3: Enhance the contrast of the edge image
     double contrastFactor = 2.0; // Experiment with higher contrast
@@ -56,17 +59,31 @@ int main(int argc, const char * argv[]) {
     // Step 4: Apply a lower threshold to make the edges more distinct
     unsigned char threshold = 50; // Lower threshold to capture more edges
     applyEdgeThreshold(&highContrastImage, threshold);
+    printf("Canny complete\n");
 
-    // Step 5: Clean up the edges using morphological operations
-    cleanUpEdges(&highContrastImage);
-
-    // Step 6: Write the processed image to a new file
-    writeImage(highContrastImage, outputFilename);
-
-    // Free memory
-    deleteImage(img);
-    deleteImage(smoothed);
+    //Step 5: Use Hough Transformation to filter out anything besides the coral.
+    int minRadius = 85;
+    int maxRadius = 200;
+    int houghThreshold = 27; 
+    Image houghTransformed = detectCirclesHough(highContrastImage, minRadius, maxRadius, houghThreshold);
     deleteImage(highContrastImage);
+    printf("Hough complete\n");
+
+    // Step 6: Clean up the edges using morphological operations
+    cleanUpEdges(&houghTransformed);
+    printf("Clean Up complete\n");
+
+    //Step 7: Create a mask based on the hough transformation by connecting nearby circles. 
+    Image mask = fillRings(&houghTransformed);
+    printf("Hough complete\n");
+    deleteImage(houghTransformed);
+    
+    //Step 8: Filter out the noise based on the mask
+    int noiseThreshold = 20;
+    clearNoise(&edgeImage, &mask, noiseThreshold);
+
+    // Step 8: Write the processed image to a new file
+    writeImage(edgeImage, outputFilename);
 
     printf("Program ends ... ");
     return 0;
@@ -213,8 +230,9 @@ void applyEdgeThreshold(Image *img, unsigned char threshold) {
 }
 
 void cleanUpEdges(Image *img) {
-    shrinkImage(img); // Removes small noise
     expandImage(img); // Expands edges to restore structure
+    expandImage(img);
+    shrinkImage(img); // Removes small noise
 }
 
 Image averageNeighborPixels(Image img, int size) {
@@ -262,6 +280,7 @@ int getMidpoint(int size){
     }
 }
 
+//Applies convulution given image matrix and convulution matrix as inputs 
 Matrix convolve(Matrix m1, Matrix m2){
     int anchorHeight = getMidpoint(m2.height);
     int anchorWidth = getMidpoint(m2.width);
@@ -289,6 +308,7 @@ Matrix convolve(Matrix m1, Matrix m2){
     return convolve;
 }
 
+//Performs canny edge detection on given image, returns output as a seperate image
 Image canny(Image img){
     Matrix input = image2Matrix(img);
 
@@ -469,3 +489,249 @@ Image canny(Image img){
     deleteMatrix(hysterisis);
     return finalEdges;
 }
+
+Image detectCirclesHough(Image edgeImage, int minRadius, int maxRadius, int threshold) {
+    int height = edgeImage.height;
+    int width = edgeImage.width;
+
+    // Allocate 3D accumulator array for (a, b, r)
+    int ***accumulator = (int ***)malloc((height) * sizeof(int **));
+    for (int i = 0; i < height; i++) {
+        accumulator[i] = (int **)malloc((width) * sizeof(int *));
+        for (int j = 0; j < width; j++) {
+            accumulator[i][j] = (int *)calloc((maxRadius - minRadius + 1), sizeof(int));
+        }
+    }
+
+    // Hough Transform
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (edgeImage.map[y][x].i > 0) { // If edge pixel (non-black pixel)
+                for (int r = minRadius; r <= maxRadius; r++) {
+                    for (int theta = 0; theta < 360; theta++) {
+                        int a = x - r * cos(theta * M_PI / 180.0);
+                        int b = y - r * sin(theta * M_PI / 180.0);
+                        if (a >= 0 && a < width && b >= 0 && b < height) {
+                            accumulator[b][a][r - minRadius]++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Create a blank output image
+    Image outputImage = createImage(height, width);
+    for(int y = 0; y < height; y++){
+        for(int x = 0; x < width; x++){
+            outputImage.map[y][x].r = 0;
+                outputImage.map[y][x].g = 0;
+                outputImage.map[y][x].b = 0;
+                outputImage.map[y][x].i = 0;
+        }
+    }
+
+    // Find local maxima in the accumulator array
+    for (int a = 0; a < height; a++) {
+        for (int b = 0; b < width; b++) {
+            for (int r = 0; r <= maxRadius - minRadius; r++) {
+                if (accumulator[a][b][r] >= threshold) {
+                    // Draw the detected circle on the output image
+                    int radius = r + minRadius;
+                    for (int theta = 0; theta < 360; theta++) {
+                        int x = b + radius * cos(theta * M_PI / 180.0);
+                        int y = a + radius * sin(theta * M_PI / 180.0);
+                        if (x >= 0 && x < width && y >= 0 && y < height) {
+                            outputImage.map[y][x].r = 255;
+                            outputImage.map[y][x].g = 255;
+                            outputImage.map[y][x].b = 255;
+                            outputImage.map[y][x].i = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Free accumulator array memory
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            free(accumulator[i][j]);
+        }
+        free(accumulator[i]);
+    }
+    free(accumulator);
+
+    return outputImage;
+}
+
+//THIS FUNCTION IS NOT USED. Could in theory be used to better classify the mask. 
+//Currently does not work
+Image createMask(Image input, int threshold){
+    Image mask = createImage(input.height, input.width);
+    for(int y = 0; y < mask.height; y++){
+        for(int x = 0; x < mask.width; x++){
+            mask.map[y][x].r = 0;
+            mask.map[y][x].g = 0;
+            mask.map[y][x].b = 0;
+            mask.map[y][x].i = 0;
+        }
+    }
+
+    //Checks left, right, above, and below for nearby circles by checking pixel intensities
+    for(int y = 0; y < input.height; y++){
+        for(int x = 0; x < input.width; x++){
+            if(input.map[y][x].i != 0){
+                //Left line connection
+                for(int l = x; l > x - threshold; l--){
+                    if(l >= 0 && l < input.width && input.map[y][l].i != 0){
+                        line(mask, l, y, x, y, 0, 0, 0, 255, 255, 255, 255);
+                        break;
+                    }
+                }
+
+                //Right line connection
+                for(int r = x; r < x + threshold; r++){
+                    if(r >= 0 && r < input.width && input.map[y][r].i != 0){
+                        line(mask, x, y, r, y, 0, 0, 0, 255, 255, 255, 255);
+                        break;
+                    }
+                }
+
+                //Above line connection
+                for(int a = y; a < y + threshold; a++){
+                    if(a >= 0 && a < input.height && input.map[a][x].i != 0){
+                        line(mask, x, y, x, a, 0, 0, 0, 255, 255, 255, 255);
+                        break;
+                    }
+                }
+
+                //Below line connection
+                for(int b = y; b > y - threshold; b--){
+                    if(b >= 0 && b < input.height && input.map[b][x].i != 0){
+                        line(mask, x, b, x, y, 0, 0, 0, 255, 255, 255, 255);
+                        break;
+                    }
+                }
+
+                mask.map[y][x].r = 255;
+                mask.map[y][x].g = 255;
+                mask.map[y][x].b = 255;
+                mask.map[y][x].i = 255;
+            }
+        }
+    }
+
+    return mask;
+}
+
+// The following definition and struct are made for the floodFill functions
+#define STACK_SIZE 1000000  // Define a large enough stack size for flood fill
+
+typedef struct {
+    int x, y;
+} Point;
+
+// Helper function for fillRings. Recursive ideology with iterative approach to aid runtime. 
+void floodFillIterative(Image *img, Image *labels, int x, int y, int fillColor) {
+    // Create a stack for iterative flood fill
+    Point stack[STACK_SIZE];
+    int stackTop = -1;
+
+    // Push the initial point onto the stack
+    stack[++stackTop] = (Point){x, y};
+
+    while (stackTop >= 0) {
+        // Pop the top point from the stack
+        Point current = stack[stackTop--];
+        int cx = current.x;
+        int cy = current.y;
+
+        // Skip if out of bounds
+        if (cx < 0 || cx >= img->height || cy < 0 || cy >= img->width)
+            continue;
+
+        // Skip if already filled or part of the boundary
+        if (labels->map[cx][cy].i == fillColor || img->map[cx][cy].i == 255)
+            continue;
+
+        // Fill the current pixel
+        labels->map[cx][cy].r = fillColor;
+        labels->map[cx][cy].g = fillColor;
+        labels->map[cx][cy].b = fillColor;
+        labels->map[cx][cy].i = fillColor;
+
+        // Push neighbors onto the stack
+        if (stackTop + 4 < STACK_SIZE) {  // Ensure we don't overflow the stack
+            if(!(cx+1 >= img->height) && !(labels->map[cx+1][cy].i == fillColor || img->map[cx+1][cy].i == 255)){
+                stack[++stackTop] = (Point){cx + 1, cy};
+            }
+            if(!(cx-1 < 0) && !(labels->map[cx-1][cy].i == fillColor || img->map[cx-1][cy].i == 255)){
+                stack[++stackTop] = (Point){cx - 1, cy};
+            }
+            if(!(cy+1 >= img->width) && !(labels->map[cx][cy+1].i == fillColor || img->map[cx][cy+1].i == 255)){
+                stack[++stackTop] = (Point){cx, cy + 1};
+            }
+            if(!(cy-1 < 0) && !(labels->map[cx][cy-1].i == fillColor || img->map[cx][cy-1].i == 255)){
+                stack[++stackTop] = (Point){cx, cy - 1};
+            }
+        } else {
+            fprintf(stderr, "Stack overflow in floodFillIterative\n");
+            exit(1);
+        }
+    }
+}
+
+// Function to fill the rings in the image
+Image fillRings(Image *img) {
+    Image labels = createImage(img->height, img->width);
+    Image filled = createImage(img->height, img->width);
+    
+    floodFillIterative(img, &labels, 0, 0, 75);
+
+    for (int x = 0; x < img->height; x++) {
+        for (int y = 0; y < img->width; y++) {
+            filled.map[x][y].r = 0;
+            filled.map[x][y].g = 0;
+            filled.map[x][y].b = 0;
+            filled.map[x][y].i = 0;
+        }
+    }
+
+    for (int x = 0; x < img->height; x++) {
+        for (int y = 0; y < img->width; y++) {
+            if (labels.map[x][y].i != 75) {
+                filled.map[x][y].r = 255;
+                filled.map[x][y].g = 255;
+                filled.map[x][y].b = 255;
+                filled.map[x][y].i = 255;
+            }
+        }
+    }
+
+    deleteImage(labels);
+    return filled;
+}
+
+// Function to clear the noise given canny edge output and mask
+void clearNoise(Image *input, Image *mask, int threshold){
+    for(int y = 0; y < input->height; y++){
+        for(int x = 0; x < input->width; x++){
+            int withinMask = 0;
+            for(int y2 = y - threshold; y2 <= y + threshold; y2++){
+                for(int x2 = x - threshold; x2 <= x + threshold; x2++){
+                    if(y2 >= 0 && y2 < input->height && x2 >= 0 && x2 < input->width && mask->map[y2][x2].i == 255){
+                        withinMask = 1;
+                    }
+                }
+            }
+            if(withinMask == 0){
+                input->map[y][x].i = 0;
+                input->map[y][x].r = 0;
+                input->map[y][x].g = 0;
+                input->map[y][x].b = 0;
+            } 
+        }
+    }
+}
+
